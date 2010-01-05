@@ -1,0 +1,41 @@
+This is a mirror of http://www.vim.org/scripts/script.php?script_id=2917
+
+This plugin helps users to deal with plugins that are distributed via 
+source code repositories. Usually, you would make those plugins 
+available to vim by adding the local copies of those repositories to 
+|runtimepath|. The disadvantage of this approach is that the value of 
+|runtimepath| becomes unnecessarily complex and that the plugins are 
+loaded on startup.
+
+tplugin scans those plugins for commands and functions. It then amends 
+the |runtimepath| only if a respective command/function/map is called 
+(similar to the AsNeeded plugin). This helps to keep your |runtimepath| 
+simple and to improve startup time.
+
+In order to achieve this goal, plugins are installed in an alternative 
+directory structure where each plugin (consequently referred to as 
+"repo") is installed in a subdirectory. tplugin takes care of modifying 
+'runtimepath' and of loading the vim script files as necessary.
+
+Alternative directory layout:
+
+    ROOT/
+      repo1/
+        after/
+        autoload/
+        doc/
+        plugin/
+      repo2/
+        after/
+        autoload/
+        doc/
+        plugin/
+      ...
+
+Repos can be enabled (i.e. added to 'runtimepath') either explicitly 
+with the |:TPlugin| command or automatically by calling a command, 
+function, or by requesting a filetype plugin/syntax/indent file defined 
+in a repo -- this is done similar to how AsNeeded autoloads files.
+
+Full docs:
+http://github.com/tomtom/tplugin_vim/blob/master/doc/tplugin.txt
