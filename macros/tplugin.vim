@@ -3,14 +3,14 @@
 " @Website:     http://www.vim.org/account/profile.php?user_id=4037
 " @License:     GPL (see http://www.gnu.org/licenses/gpl.txt)
 " @Created:     2010-01-04.
-" @Last Change: 2010-02-17.
-" @Revision:    1026
+" @Last Change: 2010-04-13.
+" @Revision:    1394
 " GetLatestVimScripts: 2917 1 :AutoInstall: tplugin.vim
 
 if &cp || exists("loaded_tplugin")
     finish
 endif
-let loaded_tplugin = 7
+let loaded_tplugin = 8
 
 let s:save_cpo = &cpo
 set cpo&vim
@@ -35,8 +35,10 @@ endif
 
 
 if !exists('g:tplugin_helptags')
-    " If non-nil, optionally generate helptags for the repository's doc 
-    " subdirectory.
+    " If non-nil and a repo contains no helptags file, generate helptags 
+    " for the repository's doc subdirectory.
+    "
+    " See also |g:tplugin_scan|.
     let g:tplugin_helptags = 1   "{{{2
 endif
 
@@ -64,13 +66,130 @@ endif
 
 
 if !exists('g:tplugin_scan')
-    " The default value for |:TPluginScan|.
-    let g:tplugin_scan = 'cfapt'   "{{{2
+    " The default value for |:TPluginScan|. A set of identifiers 
+    " determining the information being collected:
+    "    c ... commands
+    "    f ... functions
+    "    p ... <plug> maps
+    "    t ... filetypes
+    "    h ... helptags (always regenerate helptags, see also |g:tplugin_helptags|)
+    "    a ... autoload
+    "    all ... all of the above
+    let g:tplugin_scan = 'cfpta'   "{{{2
+    "    l ... loaded_* variables
 endif
 
 
-function! s:Join(filename_parts) "{{{3
-    let parts = map(copy(a:filename_parts), 'substitute(v:val, ''[\/]\+$'', "", "")')
+" :display: :TPlugin[!] REPOSITORY [PLUGINS ...]
+" Register certain plugins for being sourced at |VimEnter| time.
+" See |tplugin.txt| for details.
+"
+" With the optional '!', the plugin will be loaded immediately.
+" In interactive use, i.e. once vim was loaded, plugins will be loaded 
+" immediately anyway.
+"
+" IF REPOSITORY contains a slash or a backslash, it is considered the 
+" path relative from the current root directory to the plugin directory. 
+" This allows you to deal with repositories with a non-standard 
+" directory layout. Otherwise it is assumed that the source files are 
+" located in the "plugin" subdirectory.
+"
+" IF PLUGIN is "-", the REPOSITORY will be enabled but no plugin will be 
+" loaded.
+command! -bang -nargs=+ -complete=customlist,s:TPluginComplete TPlugin
+            \ call TPluginRequire(!empty("<bang>"), '', <f-args>)
+
+
+" :display: :TPluginRoot DIRECTORY
+" Define the root directory for the following |:TPlugin| commands.
+" Read autoload information if available (see |g:tplugin_autoload| and 
+" |:TPluginScan|).
+"
+" If DIRECTORY ends with "*", it doesn't refer to a directory hierarchy 
+" à la vimfiles but to a single "flat" directory.
+"
+" Example: >
+"   " A collection of git repositories
+"   TPluginRoot ~/src/git_repos
+"   " A directory with experimental plugins
+"   TPluginRoot ~/vimfiles/experimental_plugins/*
+command! -nargs=+ -complete=dir TPluginRoot
+            \ call s:SetRoot(<q-args>)
+
+
+
+" :display: :TPluginScan[!] [WHAT] [ROOT]
+" Scan the current root directory for commands and functions. Save 
+" autoload information in "ROOT/_tplugin.vim".
+"
+" Where WHAT is a set of letters determining the information being 
+" collected. See |g:tplugin_scan| for details.
+"
+" With the optional '!', the autocommands are immediatly usable.
+"
+" Other than the AsNeeded plugin, tplugin doesn't support the creation 
+" of autoload information for maps.
+"
+" If you collect repositories in one than more directory, I'd suggest to 
+" create a special script.
+"
+" The source file may contain special markers that make :TPluginScan 
+" include text in the _tplugin.vim file:
+"                                                     *#TPluginInclude*
+" Blocks of non-empty lines are introduced with an #TPluginInclude tag: >
+"
+"   " #TPluginInclude
+"   augroup Foo
+"        autocmd!
+"        autocmd Filetype foo call foo#Init()
+"   augroup END
+"
+" Special lines are prefixed with #TPluginInclude: >
+"   
+"   " #TPluginInclude if !exists('g:foo') | let g:foo = 1 | endif
+"
+" Example: >
+"   TPluginRoot dir1
+"   TPluginScan
+"   TPluginRoot dir2
+"   TPluginScan
+command! -bang -nargs=* TPluginScan
+            \ call s:ScanRoots(!empty("<bang>"), s:roots, [<f-args>])
+
+
+" :display: :TPluginBefore FILE_RX [GLOB_PATTERNS ...]
+" Load dependencies given as GLOB_PATTERNS (see |wildcards|) before 
+" loading a file matching the |regexp| pattern FILE_RX.
+"
+" The files matching FILE_PATTERNS are loaded after the repo's path is 
+" added to the 'runtimepath'. You can thus use partial filenames as you 
+" would use for the |:runtime| command.
+"
+" This command should be best put into ROOT/tplugin_REPO.vim files, 
+" which are loaded when enabling a source repository.
+"
+" Example: >
+"   " Load master.vim before loading any plugin in a repo
+"   TPluginBefore plugin/.\{-}\.vim plugin/master.vim
+command! -nargs=+ TPluginBefore
+            \ let s:before[[<f-args>][0]] = [<f-args>][1:-1]
+
+
+" :display: :TPluginAfter FILE_RX [GLOB_PATTERNS ...]
+" Load other plugins matching GLOB_PATTERNS (see |wildcards|) after 
+" loading a file matching the |regexp| pattern FILE_RX.
+" See also |:TPluginBefore|.
+"
+" Example: >
+"   " Load auxiliary plugins after loading master.vim
+"   TPluginAfter plugin/master\.vim plugin/sub_*.vim
+command! -nargs=+ TPluginAfter
+            \ let s:after[[<f-args>][0]] = [<f-args>][1:-1]
+
+
+
+function! s:FileJoin(...) "{{{3
+    let parts = map(copy(a:000), 'substitute(v:val, ''[\/]\+$'', "", "")')
     return join(parts, '/')
 endf
 
@@ -84,6 +203,10 @@ let s:before = {}
 let s:after = {}
 let s:ftypes = {}
 let s:functions = {}
+let s:autoloads = {}
+let s:maps = {}
+let s:command_nobang = {}
+" let s:loaded_variables = {}
 let s:tplugin_file = '_tplugin'
 
 
@@ -99,12 +222,6 @@ else
 endif
 
 
-function! s:RegisterFunction(def) "{{{3
-    " TLogVAR a:def
-    let s:functions[a:def[1]] = a:def
-endf
-
-
 function! s:Strip(string) "{{{3
     let string = substitute(a:string, '^\s\+', '', '')
     let string = substitute(string, '\s\+$', '', '')
@@ -112,35 +229,59 @@ function! s:Strip(string) "{{{3
 endf
 
 
-function! s:Command(string) "{{{3
-    let string = s:Strip(a:string)
+function! s:CommandKey(pluginfile) "{{{3
+    " echom "DBG ". a:pluginfile
+    return substitute(a:pluginfile, '\\', '/', 'g')
+endf
+
+
+function! s:DefineCommand(def1) "{{{3
+    let [cmd0; file] = a:def1
+    let string = s:Strip(cmd0)
     if match(string, '\s') == -1
         return 'command! -bang -range -nargs=* '. string
     else
         " let cmd = matchstr(a:string, '\s\zs\u\w*$')
-        let string = substitute(string, '^com\%[mand]\zs\s', '! ', '')
+        if string =~ '^com\%[mand]\zs\s'
+            let pluginfile = s:GetPluginFile(s:GetRoot(), file[0], file[1])
+            let pluginkey = s:CommandKey(pluginfile)
+            if !has_key(s:command_nobang, pluginkey)
+                let s:command_nobang[pluginkey] = {}
+            endif
+            let cmd = s:ExtractCommand(cmd0)
+            if !has_key(s:command_nobang[pluginkey], cmd)
+                let s:command_nobang[pluginkey][cmd] = 1
+            endif
+            let string = substitute(string, '^com\%[mand]\zs\s', '! ', '')
+        endif
         return string
     endif
 endf
 
 
-" args: A string it type == 1, a list if type == 2
+function! s:ExtractCommand(cmd0) "{{{3
+    return matchstr(a:cmd0, '\s\zs\u\w*$')
+endf
+
+
+" args: A string if type == 1, a list if type == 2
 function! s:Autoload(type, def, bang, range, args) "{{{3
     " TLogVAR a:type, a:def, a:bang, a:range, a:args
     let [root, cmd0; file] = a:def
     let cmd0 = s:Strip(cmd0)
     if match(cmd0, '\s') != -1
-        let cmd = matchstr(cmd0, '\s\zs\u\w*$')
+        let cmd = s:ExtractCommand(cmd0)
     else
         let cmd = cmd0
     endif
     " TLogVAR root, cmd0, cmd, file
     if a:type == 1 " Command
+        let pluginfile = s:GetPluginFile(root, file[0], file[1])
+        call s:RemoveAutoloads(pluginfile, [cmd])
         " TLogDBG exists(':'. cmd)
-        exec 'delcommand '. cmd
     endif
     if len(file) >= 1 && len(file) <= 2
-        call call('TPlugin', [1, root] + file)
+        call call('TPluginRequire', [1, root] + file)
     else
         echoerr 'Malformed autocommand definition: '. join(a:def)
     endif
@@ -166,26 +307,37 @@ function! TPluginFiletype(filetype, repos) "{{{3
     if !has_key(s:ftypes, a:filetype)
         let s:ftypes[a:filetype] = []
     endif
-    let repos = map(copy(a:repos), 's:roots[0] ."/". v:val')
+    let repos = map(copy(a:repos), 's:GetRoot() ."/". v:val')
     call extend(s:ftypes[a:filetype], repos)
 endf
 
 
-function! s:Filetype(filetype) "{{{3
+function! s:LoadFiletype(filetype) "{{{3
     " TLogVAR a:repos
-    for repo in s:ftypes[a:filetype]
-        call TPlugin(1, repo, '.', '.')
+    let repos = remove(s:ftypes, a:filetype)
+    for repo in repos
+        call TPluginRequire(1, repo, '.', '.')
     endfor
-    call remove(s:ftypes, a:filetype)
     exec 'setfiletype '. a:filetype
 endf
 
 
 function! s:AutoloadFunction(fn) "{{{3
-    " TLogVAR a:fn
+    " echom "DBG fn =". a:fn
     " call tlog#Debug(has_key(s:functions, a:fn))
     " call tlog#Debug(string(keys(s:functions)))
     " call tlog#Debug(string(keys(s:functions)))
+    if stridx(a:fn, '#') != -1
+        let prefix = substitute(a:fn, '#[^#]\{-}$', '', '')
+        " echom "DBG prefix = ". prefix
+        " echom "DBG autoloads = ". string(keys(s:autoloads))
+        if has_key(s:autoloads, prefix)
+            " let def = s:autoloads[prefix]
+            let def = remove(s:autoloads, prefix)
+            call call('TPluginRequire', [1] + def)
+            return 1
+        endif
+    endif
     if has_key(s:functions, a:fn)
         " TLogVAR a:fn
         let def = s:functions[a:fn]
@@ -211,12 +363,17 @@ endf
 function! TPluginMap(map, repo, plugin, ...) "{{{3
     if g:tplugin_autoload
         let remap = a:0 >= 1 ? substitute(a:1, '<', '<lt>', 'g') : ''
-        let def   = [s:roots[0], a:repo, a:plugin]
-        let keys  = matchstr(a:map, '\c<plug>\w\+$')
+        let def   = [s:GetRoot(), a:repo, a:plugin]
+        let keys  = s:MapKeys(a:map)
         if empty(keys)
             let keys = matchstr(a:map, '\S\+$')
         endif
         if !empty(keys)
+            let pluginfile = s:GetPluginFile(s:GetRoot(), a:repo, a:plugin)
+            if !has_key(s:maps, pluginfile)
+                let s:maps[pluginfile] = {}
+            endif
+            let s:maps[pluginfile][keys] = a:map
             let mode = s:MapMode(a:map)
             try
                 let maparg = maparg(keys, mode)
@@ -225,18 +382,29 @@ function! TPluginMap(map, repo, plugin, ...) "{{{3
                 let maparg = ""
             endtry
             if empty(maparg)
-                exec a:map .' <C-\><C-G>:call <SID>Remap('. join([string(keys), string(a:map), string(remap), string(def)], ',') .')<cr>'
+                let map = substitute(a:map, '<script>', '', '')
+                exec map .' <C-\><C-G>:call <SID>Remap('. join([string(keys), string(a:map), string(remap), string(def)], ',') .')<cr>'
             endif
         endif
     endif
 endf
 
 
+function! s:MapKeys(map) "{{{3
+    return matchstr(a:map, '\c<plug>\w\+$')
+endf
+
+
+function! s:Unmap(map, keys) "{{{3
+    let mode = s:MapMode(a:map)
+    exec 'silent! '. mode .'unmap '. a:keys
+endf
+
+
 function! s:Remap(keys, map, remap, def) "{{{3
     " TLogVAR a:keys, a:map, a:def, a:remap
-    let mode = s:MapMode(a:map)
-    exec mode .'unmap '. a:keys
-    call call('TPlugin', [1] + a:def)
+    call s:Unmap(a:map, a:keys)
+    call call('TPluginRequire', [1] + a:def)
     if !empty(a:remap)
         " TLogDBG a:map .' '. a:remap
         exec a:map .' '. a:remap
@@ -255,12 +423,12 @@ endf
 
 let s:scanner = {
             \ 'c': {
-            \   'rx':  '^\s*:\?com\%[mand]!\?\s\+\(-\S\+\s\+\)*\w\+',
-            \   'fmt': {'cargs3': 'TPluginCommand %s %s %s'}
+            \   'rx':  '^\s*:\?com\%[mand]!\?\s\+\(-\S\+\s\+\)*\u\k*',
+            \   'fmt': {'sargs3': 'call TPluginCommand(%s, %s, %s)'}
             \ },
             \ 'f': {
             \   'rx':  '^\s*:\?fu\%[nction]!\?\s\+\zs\(s:\|<SID>\)\@![^[:space:].]\{-}\ze\s*(',
-            \   'fmt': {'cargs3': 'TPluginFunction %s %s %s'}
+            \   'fmt': {'sargs3': 'call TPluginFunction(%s, %s, %s)'}
             \ },
             \ 'p': {
             \   'rx':  '\c^\s*:\?\zs[incvoslx]\?\(nore\)\?map\s\+\(<\(silent\|unique\|buffer\|script\)>\s*\)*<plug>\w\+',
@@ -274,10 +442,28 @@ function! s:ScanSource(file, repo, plugin, what, lines) "{{{3
     let text = substitute(text, '\n\s*\\', '', 'g')
     let lines = split(text, '\n')
     let rx = join(filter(map(copy(a:what), 'get(get(s:scanner, v:val, {}), "rx", "")'), '!empty(v:val)'), '\|')
-    call filter(lines, 'v:val =~ rx')
-    call map(lines, 's:ScanLine(a:file, a:repo, a:plugin, a:what, v:val)')
-    call filter(lines, '!empty(v:val)')
-    return lines
+    let out = []
+    let include = 0
+    for line in lines
+        if include
+            if line !~ '\S'
+                let include = 0
+            else
+                call add(out, line)
+            endif
+        elseif line =~ '^\s*"\s*#TPluginInclude\s*$'
+            let include = 1
+        elseif line =~ '^\s*"\s*#TPluginInclude\s*\S'
+            let out_line = substitute(line, '^\s*"\s*#TPluginInclude\s*', '', '')
+            call add(out, out_line)
+        elseif line =~ rx
+            let out_line = s:ScanLine(a:file, a:repo, a:plugin, a:what, line)
+            if !empty(out_line)
+                call add(out, out_line)
+            endif
+        endif
+    endfor
+    return out
 endf
 
 
@@ -293,6 +479,7 @@ function! s:ScanLine(file, repo, plugin, what, line) "{{{3
         if !empty(scanner)
             let m = s:Strip(matchstr(a:line, scanner.rx))
             if !empty(m)
+                let m = substitute(m, '\s\+', ' ', 'g')
                 " TLogVAR m
                 if !has_key(s:scan_repo_done, what)
                     let s:scan_repo_done[what] = {}
@@ -321,9 +508,10 @@ endf
 function! s:ScanRoots(immediate, roots, args) "{{{3
     let awhat = get(a:args, 0, '')
     if empty(awhat)
-        let what = split(g:tplugin_scan, '\zs')
-    elseif awhat == 'all'
-        let what = ['c', 'f', 'a', 'p', 'h', 't']
+        let awhat = g:tplugin_scan
+    endif
+    if awhat == 'all'
+        let what = ['c', 'f', 'a', 'p', 'h', 't', 'l']
     else
         let what = split(awhat, '\zs')
     endif
@@ -341,12 +529,10 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
 
         " TLogVAR root
         if root =~ '[\\/]\*$'
-            let root = s:RootDirOnDisk(root)
+            let root = s:GetRootDirOnDisk(root)
             let is_tree = 0
-            let files0 = split(glob(join([root, '*.vim'], '/')), '\n')
         else
             let is_tree = 1
-            let files0 = split(glob(join([root, '**', '*.vim'], '/')), '\n')
         endif
         " TLogVAR root, is_tree, isdirectory(root), len(files0)
 
@@ -354,39 +540,23 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
             continue
         endif
 
+        let files0 = s:GetFiles(root, is_tree)
         let pos0 = len(root) + 1
         " TLogVAR pos0
-        call filter(files0, '!empty(v:val) && v:val !~ ''[\/]\(\.git\|.svn\|CVS\)\([\/]\|$\)''')
-        let exclude_rx = '\V'. join(add(g:tplugin_autoload_exclude, '\[\\/]'. s:tplugin_file .'\(_\w\+\)\?\.vim\$'), '\|')
-        " TLogVAR exclude_rx
-        if exclude_rx != '\V'
-            call filter(files0, 'v:val !~ exclude_rx')
-        endif
-        " TLogVAR files0
-        " TLogDBG len(files0)
         " TLogDBG strpart(files0[0], pos0)
-
-        if !is_tree
-            let filelist = copy(files0)
-        elseif index(what, 'a') != -1
-            let filelist = filter(copy(files0), 'strpart(v:val, pos0) =~ ''^[^\/]\+[\/]\(plugin\|autoload\)[\/].\{-}\.vim$''')
-        else
-            let filelist = filter(copy(files0), 'strpart(v:val, pos0) =~ ''^[^\/]\+[\/]plugin[\/][^\/]\{-}\.vim$''')
-        endif
-        " TLogDBG len(files0)
-        " TLogDBG len(filelist)
+        let filelist = s:GetFilelist(files0, what, pos0, is_tree)
 
         let out = [
                     \ '" This file was generated by TPluginScan.',
                     \ 'if g:tplugin_autoload == 2 && g:loaded_tplugin != '. g:loaded_tplugin .' | throw "TPluginScan:Outdated" | endif'
                     \ ]
 
-        if g:tplugin_helptags && is_tree
-            let helpdirs = split(glob(join([root, '*', 'doc'], '/')), '\n')
+        if (g:tplugin_helptags || index(what, 'h') != -1) && is_tree
+            let helpdirs = split(glob(s:FileJoin(root, '*', 'doc')), '\n')
             for doc in helpdirs
-                let tags = join([doc, 'tags'], '/')
-                if index(what, 'h') != -1 || !filereadable(tags)
-                    if isdirectory(doc)
+                if isdirectory(doc)
+                    let tags = s:FileJoin(doc, 'tags')
+                    if index(what, 'h') != -1 || !filereadable(tags)
                         exec 'helptags '. s:FnameEscape(doc)
                     endif
                 endif
@@ -401,6 +571,7 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
         endif
 
         if is_tree && index(what, 't') != -1
+
             for ftdetect in filter(copy(files0), 'strpart(v:val, pos0) =~ ''^[^\/]\+[\/]ftdetect[\/][^\/]\{-}\.vim$''')
                 call add(out, 'augroup filetypedetect')
                 call extend(out, readfile(ftdetect))
@@ -447,8 +618,14 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
                 let repo_names = map(keys(repos), 'strpart(v:val, pos0)')
                 call add(out, 'call TPluginFiletype('. string(ft) .', '. string(repo_names) .')')
             endfor
-        endif
 
+            if index(what, 'a') != -1
+                let autoloads = filter(copy(files0), 'strpart(v:val, pos0) =~ ''^[^\/]\+[\/]autoload[\/].\{-}\.vim$''')
+                call s:AddAutoloads(out, root, pos0, autoloads)
+            endif
+
+        endif
+        
         let s:scan_repo_done = {}
         try
             let fidx = 0
@@ -459,6 +636,7 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
                     let fidx += 1
                     call tlib#progressbar#Display(fidx)
                 endif
+                let pluginfile = s:GetCanonicFilename(file)
                 if is_tree
                     let repo = matchstr(strpart(file, pos0), '^[^\/]\+\ze[\/]')
                 else
@@ -467,24 +645,42 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
                 let plugin = matchstr(file, '[\/]\zs[^\/]\{-}\ze\.vim$')
                 " TLogVAR file, repo, plugin
 
-                if !empty(g:tplugin_menu_prefix) && (!is_tree || strpart(file, pos0) =~ '^[^\/]\+[\/]plugin[\/][^\/]\{-}\.vim$')
-                    if is_tree
-                        let mrepo = escape(repo, '\.')
-                    else
-                        let mrepo = escape(fnamemodify(root, ':t'), '\.')
+                let is_plugin = !is_tree || strpart(file, pos0) =~ '^[^\/]\+[\/]plugin[\/][^\/]\{-}\.vim$'
+
+                let lines = readfile(file)
+
+                if is_plugin
+                    if !empty(g:tplugin_menu_prefix)
+                        if is_tree
+                            let mrepo = escape(repo, '\.')
+                        else
+                            let mrepo = escape(fnamemodify(root, ':t'), '\.')
+                        endif
+                        let mplugin = escape(plugin, '\.')
+                        if !has_key(menu_done, repo)
+                            call add(out, 'call TPluginMenu('. string(mrepo .'.Add\ Repository') .', '.
+                                        \ string(repo) .')')
+                            call add(out, 'call TPluginMenu('. string(mrepo .'.-'. mrepo .'-') .', ":")')
+                            let menu_done[repo] = 1
+                        endif
+                        call add(out, 'call TPluginMenu('. string(mrepo .'.'. mplugin) .', '.
+                                    \ string(repo) .', '. string(plugin) .')')
                     endif
-                    let mplugin = escape(plugin, '\.')
-                    if !has_key(menu_done, repo)
-                        call add(out, 'call TPluginMenu('. string(mrepo .'.Repository') .', '.
-                                    \ string(':TPlugin! '. repo .'<cr>') .')')
-                        call add(out, 'call TPluginMenu('. string(mrepo .'.-'. mrepo .'-') .', ":")')
-                        let menu_done[repo] = 1
-                    endif
-                    call add(out, 'call TPluginMenu('. string(mrepo .'.'. mplugin) .', '.
-                                \ string(':TPlugin! '. repo .' '. plugin .'<cr>') .')')
+
+                    " if index(what, 'l') != -1
+                    "     for line in lines
+                    "         if line =~ '\c^let\s\+\(g:\)\?loaded_'. plugin .'\s*='
+                    "             let loaded = matchstr(line, '\c^let\s\+\zs\(g:\)\?loaded_'. plugin)
+                    "             let s:loaded_variables[pluginfile] = loaded
+                    "             call add(out, line)
+                    "             break
+                    "         endif
+                    "     endfor
+                    " endif
+
                 endif
 
-                let out += s:ScanSource(file, repo, plugin, what, readfile(file))
+                let out += s:ScanSource(file, repo, plugin, what, lines)
             endfor
         finally
             unlet s:scan_repo_done
@@ -497,7 +693,7 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
         endtry
 
         " TLogVAR out
-        let outfile = join([root, s:tplugin_file .'.vim'], '/')
+        let outfile = s:FileJoin(root, s:tplugin_file .'.vim')
         call writefile(out, outfile)
         if a:immediate
             exec 'source '. s:FnameEscape(outfile)
@@ -507,23 +703,89 @@ function! s:ScanRoots(immediate, roots, args) "{{{3
 endf
 
 
+function! s:GetFiles(root, is_tree) "{{{3
+    if a:is_tree
+        let files0 = split(glob(s:FileJoin(a:root, '**', '*.vim')), '\n')
+    else
+        let files0 = split(glob(s:FileJoin(a:root, '*.vim')), '\n')
+    endif
+    " TLogVAR files0
+
+    call filter(files0, '!empty(v:val) && v:val !~ ''[\/]\(\.git\|.svn\|CVS\)\([\/]\|$\)''')
+    let exclude_rx = '\V'. join(add(g:tplugin_autoload_exclude, '\[\\/]'. s:tplugin_file .'\(_\w\+\)\?\.vim\$'), '\|')
+    " TLogVAR exclude_rx
+    if exclude_rx != '\V'
+        call filter(files0, 'v:val !~ exclude_rx')
+    endif
+    " TLogVAR files0
+    " TLogDBG len(files0)
+    return files0
+endf
+
+
+function! s:GetFilelist(files0, what, pos0, is_tree) "{{{3
+    if !a:is_tree
+        let filelist = copy(a:files0)
+    else
+        let filelist = filter(copy(a:files0), 'strpart(v:val, a:pos0) =~ ''^[^\/]\+[\/]plugin[\/][^\/]\{-}\.vim$''')
+    endif
+    " TLogDBG len(a:files0)
+    " TLogDBG len(filelist)
+    return filelist
+endf
+
+
+function! s:AddAutoloads(out, root, pos0, files) "{{{3
+    " TLogVAR a:files
+    for file0 in a:files
+        let file = strpart(file0, a:pos0)
+        let repo = matchstr(file, '^[^\/]\+')
+        let def = [repo]
+        let prefix = substitute(matchstr(file, '^[^\/]\+[\/]autoload[\/]\zs.\{-}\ze\.vim$'), '[\/]', '#', 'g')
+        let pluginfile = substitute(file, '^[^\/]\+[\/]\zsautoload\ze[\/]', 'plugin', '')
+        if index(a:files, pluginfile) != -1
+            call add(def, matchstr(pluginfile, '^[^\/]\+[\/]plugin[\/]\zs.\{-}\ze\.vim$'))
+        else
+            call add(def, '.')
+        endif
+        " TLogVAR prefix, repo, file
+        call add(a:out, printf('call TPluginAutoload(%s, %s)', string(prefix), string(def)))
+    endfor
+endf
+
+
+function! s:GetRoot() "{{{3
+    return s:roots[0]
+endf
+
+
+function! TPluginAutoload(prefix, def) "{{{3
+    " echom "DBG ". a:prefix
+    let s:autoloads[a:prefix] = [s:GetRoot()] + a:def
+endf
+
+
 " :nodoc:
-function! TPluginMenu(item, cmd) "{{{3
+function! TPluginMenu(item, ...) "{{{3
     if !empty(g:tplugin_menu_prefix)
-        exec 'amenu '. g:tplugin_menu_prefix . a:item .' '. a:cmd
+        let def = [2, s:GetRoot()] + a:000
+        call map(def, 'string(v:val)')
+        exec 'amenu <silent> '. g:tplugin_menu_prefix . a:item .' :call TPluginRequire('. join(def, ', ') .')<cr>'
     endif
 endf
 
 
-function! s:CanonicFilename(filename) "{{{3
-    let filename = substitute(a:filename, '[\/]\+$', '', '')
+function! s:GetCanonicFilename(filename) "{{{3
+    let filename = substitute(a:filename, '[\\/]\+$', '', '')
     let filename = substitute(filename, '\\', '/', 'g')
     return filename
 endf
 
 
-function! s:RootDirOnDisk(dir) "{{{3
-    let dir = substitute(a:dir, '[\\/]\*$', '', '')
+" Remove any "/*" suffix.
+function! s:GetRootDirOnDisk(dir) "{{{3
+    let dir = s:GetCanonicFilename(a:dir)
+    let dir = substitute(dir, '[\\/]\*$', '', '')
     let dir = substitute(dir, '[\\/]\+$', '', '')
     return dir
 endf
@@ -531,7 +793,7 @@ endf
 
 function! s:SetRoot(dir) "{{{3
     " echom "DBG ". a:dir
-    let root = s:CanonicFilename(fnamemodify(a:dir, ':p'))
+    let root = s:GetCanonicFilename(fnamemodify(a:dir, ':p'))
     " echom "DBG ". root
     let idx = index(s:roots, root)
     if idx > 0
@@ -544,7 +806,9 @@ function! s:SetRoot(dir) "{{{3
     " Don't reload the file. Old autoload definitions won't be 
     " overwritten anyway.
     if idx == -1 && g:tplugin_autoload
-        let autoload = join([s:RootDirOnDisk(root), s:tplugin_file .'.vim'], '/')
+        let rootdir = s:GetRootDirOnDisk(root)
+        let autoload = s:FileJoin(rootdir, s:tplugin_file .'.vim')
+        " echom "DBG ". autoload
         if filereadable(autoload)
             try
                 exec 'source '. s:FnameEscape(autoload)
@@ -561,8 +825,8 @@ function! s:SetRoot(dir) "{{{3
 endf
 
 
-function! s:AddRepo(repos) "{{{3
-    " TLogVAR a:repos
+function! s:AddRepo(rootrepos, isflat) "{{{3
+    " TLogVAR a:rootrepos
     let rtp = split(&rtp, ',')
     let idx = index(rtp, s:rtp[0])
     if idx == -1
@@ -570,61 +834,67 @@ function! s:AddRepo(repos) "{{{3
     else
         let idx += 1
     endif
-    let repos = filter(copy(a:repos), '!has_key(s:done, v:val)')
-    " TLogVAR repos, a:repos
+    let rootrepos = filter(copy(a:rootrepos), '!has_key(s:done, v:val)')
+    " TLogVAR rootrepos
     " call tlog#Debug(string(keys(s:done)))
-    if !empty(repos)
-        for repo in repos
-            let tplugin_repo = fnamemodify(repo, ':h') .'/'. s:tplugin_file .'_'. fnamemodify(repo, ':t') .'.vim'
-            " TLogVAR repo, tplugin_repo
+    if !empty(rootrepos)
+        for rootrepo in rootrepos
+            let tplugin_repo = fnamemodify(rootrepo, ':h') .'/'. s:tplugin_file .'_'. fnamemodify(rootrepo, ':t') .'.vim'
+            " TLogVAR rootrepo, tplugin_repo
             if filereadable(tplugin_repo)
                 exec 'silent! source '. s:FnameEscape(tplugin_repo)
             endif
-            let repo_tplugin = fnamemodify(repo, ':h') .'/'. fnamemodify(repo, ':t') .'/'. s:tplugin_file .'.vim'
-            if filereadable(repo_tplugin)
-                exec 'silent! source '. s:FnameEscape(repo_tplugin)
+            if !a:isflat
+                let repo_tplugin = fnamemodify(rootrepo, ':h') .'/'. fnamemodify(rootrepo, ':t') .'/'. s:tplugin_file .'.vim'
+                if filereadable(repo_tplugin)
+                    exec 'silent! source '. s:FnameEscape(repo_tplugin)
+                endif
+                " TLogVAR repo_tplugin
+                call insert(rtp, rootrepo, idx)
+                call insert(rtp, s:FileJoin(rootrepo, 'after'), -1)
             endif
-            " TLogVAR repo
-            call insert(rtp, repo, idx)
-            call insert(rtp, join([repo, 'after'], '/'), -1)
             " TLogVAR rtp
-            let s:done[repo] = {}
+            let s:done[rootrepo] = {}
         endfor
         let &rtp = join(rtp, ',')
     endif
 endf
 
 
-function! s:LoadPlugins(repo, plugins) "{{{3
-    if empty(a:plugins)
+function! s:LoadPlugins(mode, rootrepo, pluginfiles) "{{{3
+    if empty(a:pluginfiles)
         return
     endif
-    " TLogVAR a:repo, a:plugins
-    let done = s:done[a:repo]
+    " TLogVAR a:rootrepo, a:pluginfiles
+    let done = s:done[a:rootrepo]
     " TLogVAR done
     if has_key(done, '*')
         return
     endif
-    let pos0 = len(a:repo) + 1
-    for plugin in a:plugins
-        " TLogVAR plugin
-        if plugin != '-' && !has_key(done, plugin)
-            let done[plugin] = 1
-            if filereadable(plugin)
-                " TLogVAR plugin
-                let before = filter(keys(s:before), 'plugin =~ v:val')
+    let pos0 = len(a:rootrepo) + 1
+    for pluginfile in a:pluginfiles
+        let pluginfile = s:GetCanonicFilename(pluginfile)
+        " TLogVAR pluginfile
+        if pluginfile != '-' && !has_key(done, pluginfile)
+            let done[pluginfile] = 1
+            if filereadable(pluginfile)
+                call s:RemoveAutoloads(pluginfile, [])
+                let before = filter(keys(s:before), 'pluginfile =~ v:val')
                 if !empty(before)
-                    call s:Depend(a:repo, before, s:before)
+                    call s:LoadDependency(a:rootrepo, before, s:before)
                 endif
-                " TLogDBG 'source '. plugin
-                " TLogDBG filereadable(plugin)
-                " call tlog#Debug(s:FnameEscape(plugin))
-                exec 'source '. s:FnameEscape(plugin)
-                " TLogDBG 'runtime! after/'. strpart(plugin, pos0)
-                exec 'runtime! after/'. s:FnameEscape(strpart(plugin, pos0))
-                let after = filter(keys(s:after), 'plugin =~ v:val')
+                " TLogDBG 'source '. pluginfile
+                " TLogDBG filereadable(pluginfile)
+                " call tlog#Debug(s:FnameEscape(pluginfile))
+                exec 'source '. s:FnameEscape(pluginfile)
+                " TLogDBG 'runtime! after/'. strpart(pluginfile, pos0)
+                exec 'runtime! after/'. s:FnameEscape(strpart(pluginfile, pos0))
+                let after = filter(keys(s:after), 'pluginfile =~ v:val')
                 if !empty(after)
-                    call s:Depend(a:repo, after, s:after)
+                    call s:LoadDependency(a:rootrepo, after, s:after)
+                endif
+                if a:mode == 2
+                    echom "TPlugin: Loaded ". pathshorten(pluginfile)
                 endif
             endif
         endif
@@ -632,30 +902,31 @@ function! s:LoadPlugins(repo, plugins) "{{{3
 endf
 
 
-function! s:Depend(repo, filename_rxs, dict) "{{{3
-    " TLogVAR a:filename_rxs
+function! s:LoadDependency(rootrepo, filename_rxs, dict) "{{{3
+    " TLogVAR a:rootrepo, a:filename_rxs
+    " call s:AddRepo([a:rootrepo])
     for filename_rx in a:filename_rxs
         let others = a:dict[filename_rx]
         " TLogVAR others
         for other in others
             if stridx(other, '*') != -1
-                let files = split(glob(a:repo .'/'. other), '\n')
+                let pluginfiles = split(glob(a:rootrepo .'/'. other), '\n')
             else
-                let files = [a:repo .'/'. other]
+                let pluginfiles = [a:rootrepo .'/'. other]
             endif
-            call s:LoadPlugins(a:repo, files)
+            call s:LoadPlugins(0, a:rootrepo, pluginfiles)
         endfor
     endfor
 endf
 
 
-function! s:Process() "{{{3
-    " TLogDBG "Plugin:Process"
-    call s:AddRepo(keys(s:reg))
+function! s:LoadRequiredPlugins() "{{{3
+    " TLogDBG "Plugin:LoadRequiredPlugins"
+    call s:AddRepo(keys(s:reg), 0)
     if !empty(s:reg)
         " TLogVAR &rtp
-        for [repo, plugins] in items(s:reg)
-            call s:LoadPlugins(repo, plugins)
+        for [rootrepo, pluginfiles] in items(s:reg)
+            call s:LoadPlugins(0, rootrepo, pluginfiles)
         endfor
     endif
     let s:immediate = 1
@@ -663,52 +934,75 @@ endf
 
 
 " :nodoc:
-function! TPlugin(immediate, root, repo, ...) "{{{3
-    " TLogVAR a:immediate, a:root, a:repo, a:000
-    " deprecated
-    if a:repo == '.'
-        let repo = a:root
-        if !has_key(s:done, repo)
-            let s:done[repo] = {}
-        endif
-    else
-        let root = s:RootDirOnDisk(empty(a:root) ? s:roots[0] : a:root)
-        if a:repo == '-'
-            let repo = root
-            if !has_key(s:done, repo)
-                let s:done[repo] = {}
-            endif
-        else
-            let repo = join([root, a:repo], '/')
-        endif
-    endif
-    let repo = s:CanonicFilename(repo)
-    " TLogVAR repo
-    if a:repo =~ '[\/]' || a:repo == '-'
-        let pdir = repo
-    else
-        let pdir = join([repo, 'plugin'], '/')
-    endif
-    " TLogVAR a:repo, repo, pdir, a:000
+function! TPluginRequire(mode, root, repo, ...) "{{{3
+    " TLogVAR a:mode, a:root, a:repo, a:000
+    let [rootrepo, plugindir] = s:GetPluginDir(a:root, a:repo)
+    " TLogVAR rootrepo, plugindir
     if empty(a:000)
-        " TLogDBG join([pdir, '*.vim'], '/')
-        let plugins = split(glob(join([pdir, '*.vim'], '/')), '\n')
+        " TLogDBG s:FileJoin(plugindir, '*.vim')
+        let pluginfiles = split(glob(s:FileJoin(plugindir, '*.vim')), '\n')
     elseif a:1 == '.'
-        let plugins = []
+        let pluginfiles = []
     else
-        let plugins = map(copy(a:000), 'join([pdir, v:val .".vim"], "/")')
+        let pluginfiles = map(copy(a:000), 's:FileJoin(plugindir, v:val .".vim")')
     endif
-    " TLogVAR plugins
-    if s:immediate || a:immediate
-        " TLogVAR repo, plugins
-        call s:AddRepo([repo])
-        call s:LoadPlugins(repo, plugins)
+    call filter(pluginfiles, 'v:val !~ ''\V\[\/]'. s:tplugin_file .'\(_\S\{-}\)\?\.vim\$''')
+    " TLogVAR pluginfiles
+    if a:mode || s:immediate
+        " TLogVAR rootrepo, pluginfiles
+        call s:AddRepo([rootrepo], s:IsFlatRoot(a:root))
+        call s:LoadPlugins(a:mode, rootrepo, pluginfiles)
     else
-        if !has_key(s:reg, repo)
-            let s:reg[repo] = []
+        if !has_key(s:reg, rootrepo)
+            let s:reg[rootrepo] = []
         endif
-        let s:reg[repo] += plugins
+        let s:reg[rootrepo] += pluginfiles
     end
+endf
+
+
+function! s:RemoveAutoloads(pluginfile, commands) "{{{3
+    " TLogVAR a:pluginfile, a:commands
+
+    " if has_key(s:loaded_variables, a:pluginfile)
+    "     exec 'unlet '. s:loaded_variables[a:pluginfile]
+    " endif
+
+    " echom "DBG ". string(keys(s:maps))
+    if has_key(s:maps, a:pluginfile)
+        for [keys, map] in items(s:maps[a:pluginfile])
+            call s:Unmap(map, keys)
+        endfor
+        call remove(s:maps, a:pluginfile)
+    endif
+
+    let pluginkey = s:CommandKey(a:pluginfile)
+    " TLogVAR pluginkey
+    " call tlog#Debug(string(keys(s:command_nobang)))
+    if empty(a:commands)
+        if has_key(s:command_nobang, pluginkey)
+            let cmds = keys(s:command_nobang[pluginkey])
+        else
+            return
+        endif
+    else
+        let cmds = a:commands
+    endif
+
+    " TLogVAR cmds
+    " echom "DBG ". string(keys(s:command_nobang))
+    let remove = !empty(a:commands) && has_key(s:command_nobang, pluginkey)
+    for c in cmds
+        if exists(':'. c) == 2
+            exec 'delcommand '. c
+        endif
+        if remove && has_key(s:command_nobang[pluginkey], c)
+            call remove(s:command_nobang[pluginkey], c)
+        endif
+    endfor
+    if remove && empty(s:command_nobang[pluginkey])
+        call remove(s:command_nobang, pluginkey)
+    endif
 endf
 
 
@@ -718,30 +1012,31 @@ function! s:TPluginComplete(ArgLead, CmdLine, CursorPos) "{{{3
     " TLogVAR repo
     let rv = []
     " for root in s:roots
-    let root = s:roots[0]
+    let root = s:GetRoot()
     " TLogVAR root, repo
     if empty(repo)
         if root =~ '[\\/]\*$'
             let files = ['- ']
         else
             let pos0  = len(root) + 1
-            let files = split(glob(join([root, '*'], '/')), '\n')
+            let files = split(glob(s:FileJoin(root, '*')), '\n')
             call map(files, 'strpart(v:val, pos0)')
             " call tlog#Debug('v:val !~ ''\V'. s:tplugin_file .'\(_\w\+\)\?\.vim\$''')
             call filter(files, 'stridx(v:val, a:ArgLead) != -1')
         endif
         " TLogVAR files
     else
-        if root =~ '[\\/]\*$'
-            let root = s:RootDirOnDisk(root)
-            let pdir = ''
-        else
-            let pdir  = join([repo, 'plugin'], '/')
-        endif
-        let dir   = join([root, pdir], '/')
-        " TLogVAR pdir, dir
-        let pos0  = len(dir) + 1
-        let files = split(glob(join([dir, '*.vim'], '/')), '\n')
+        " if root =~ '[\\/]\*$'
+        "     let root = s:GetRootDirOnDisk(root)
+        "     let subdir = ''
+        " else
+        "     let subdir  = s:FileJoin(repo, 'plugin')
+        " endif
+        " let plugindir   = s:FileJoin(root, subdir)
+        let [rootrepo, plugindir] = s:GetPluginDir(root, repo)
+        " TLogVAR subdir, plugindir
+        let pos0  = len(plugindir) + 1
+        let files = split(glob(s:FileJoin(plugindir, '*.vim')), '\n')
         call map(files, 'strpart(v:val, pos0, len(v:val) - pos0 - 4)')
         call filter(files, 'stridx(v:val, a:ArgLead) != -1')
         " TLogVAR files
@@ -754,101 +1049,53 @@ function! s:TPluginComplete(ArgLead, CmdLine, CursorPos) "{{{3
 endf
 
 
-" let s:runtimepath0 = &rtp
-" 
-" function! s:FullRuntimepath() "{{{3
-"     let s:runtimepath0 = &rtp
-"     for root in s:roots
-"         let repos = split(glob(root .'/*'), '\n')
-"         for repo in repos
-"             exec 'set rtp+='. escape(a:repo, '\ ')
-"         endfor
-"     endfor
-" endf
-" 
-" 
-" function! s:ResetRuntimepath() "{{{3
-"     let &rtp = s:runtimepath0
-" endf
+function! s:IsFlatRoot(root) "{{{3
+    return a:root =~ '[\\/]\*$'
+endf
 
 
-" :display: :TPlugin[!] REPOSITORY [PLUGINS ...]
-" Register certain plugins for being sourced at |VimEnter| time.
-" See |tplugin.txt| for details.
-"
-" With the optional '!', the plugin will be loaded immediately.
-" In interactive use, i.e. once vim was loaded, plugins will be loaded 
-" immediately anyway.
-"
-" IF REPOSITORY contains a slash or a backslash, it is considered the 
-" path relative from the current root directory to the plugin directory. 
-" This allows you to deal with repositories with a non-standard 
-" directory layout. Otherwise it is assumed that the source files are 
-" located in the "plugin" subdirectory.
-"
-" IF PLUGIN is "-", the REPOSITORY will be enabled but no plugin will be 
-" loaded.
-command! -bang -nargs=+ -complete=customlist,s:TPluginComplete TPlugin
-            \ call TPlugin(!empty("<bang>"), '', <f-args>)
+function! s:GetPluginDir(root, repo) "{{{3
+    " echom "DBG ". string([a:root, a:repo])
+    let root = s:GetRootDirOnDisk(empty(a:root) ? s:GetRoot() : a:root)
+    let repo = s:IsFlatRoot(a:root) ? '-' : a:repo
+    " deprecated
+    if repo == '.'
+        let rootrepo = root
+    else
+        if repo == '-'
+            let rootrepo = root
+        else
+            let rootrepo = s:FileJoin(root, repo)
+        endif
+    endif
+    if repo == '-'
+        let plugindir = rootrepo
+    else
+        let plugindir = s:FileJoin(rootrepo, 'plugin')
+    endif
+    return [rootrepo, plugindir]
+endf
 
 
-" :display: :TPluginRoot DIRECTORY
-" Define the root directory for the following |:TPlugin| commands.
-" Read autoload information if available (see |g:tplugin_autoload| and 
-" |:TPluginScan|).
-"
-" If DIRECTORY ends with "*", it doesn't refer to a directory hierarchy 
-" à la vimfiles but to a single "flat" directory.
-"
-" Example: >
-"   " A collection of git repositories
-"   TPluginRoot ~/src/git_repos
-"   " A directory with experimental plugins
-"   TPluginRoot ~/vimfiles/experimental_plugins/*
-command! -nargs=+ -complete=dir TPluginRoot
-            \ call s:SetRoot(<q-args>)
+function! s:GetPluginFile(root, repo, plugin) "{{{3
+    let [rootrepo, plugindir] = s:GetPluginDir(a:root, a:repo)
+    return printf('%s/%s.vim', plugindir, a:plugin)
+endf
 
 
-" :display: :TPluginBefore FILE_RX [FILE_PATTERNS ...]
-" Load DEPENDENCIES before loading a file matching the regexp pattern 
-" FILE_RX.
-"
-" The files matching FILE_PATTERNS are loaded after the repo's path is 
-" added to the 'runtimepath'. You can thus use partial filenames as you 
-" would use for the |:runtime| command.
-"
-" This command should be best put into ROOT/tplugin_REPO.vim files, 
-" which are loaded when enabling a source repository.
-"
-" Example: >
-"   " Load master.vim before loading any plugin in a repo
-"   TPluginBefore plugin/*.vim plugin/master.vim
-command! -nargs=+ TPluginBefore
-            \ let s:before[[<f-args>][0]] = [<f-args>][1:-1]
-
-
-" :display: :TPluginAfter FILE_RX [OTHER_PLUGINS ...]
-" Load OTHER_PLUGINS after loading a file matching the regexp pattern 
-" FILE_RX.
-" See also |:TPluginBefore|.
-"
-" Example: >
-"   " Load auxiliary plugins after loading master.vim
-"   TPluginAfter plugin/master.vim plugin/sub_*.vim
-command! -nargs=+ TPluginAfter
-            \ let s:after[[<f-args>][0]] = [<f-args>][1:-1]
-
-
-" :display: :TPluginFunction FUNCTION REPOSITORY [PLUGIN]
+" :display: TPluginFunction(FUNCTION, REPOSITORY, [PLUGIN])
 " Load a certain plugin on demand (aka autoload) when FUNCTION is called 
 " for the first time.
-command! -nargs=+ TPluginFunction
-            \ if g:tplugin_autoload && !exists('*'. [<f-args>][0]) |
-            \ call s:RegisterFunction([s:roots[0], <f-args>])
-            \ | endif
+function! TPluginFunction(...) "{{{3
+    let fn = a:000[0]
+    if g:tplugin_autoload && !exists('*'. fn)
+        " echom "DBG fn = ". fn
+        let s:functions[fn] = [s:GetRoot()] + a:000
+    endif
+endf
 
 
-" :display: :TPluginCommand[!] COMMAND REPOSITORY [PLUGIN]
+" :display: TPluginCommand(COMMAND, REPOSITORY, [PLUGIN])
 " Load a certain plugin on demand (aka autoload) when COMMAND is called 
 " for the first time. Then call the original command.
 "
@@ -858,56 +1105,26 @@ command! -nargs=+ TPluginFunction
 "
 " Example: >
 "   TPluginCommand TSelectBuffer vimtlib tselectbuffer
-command! -bang -nargs=+ TPluginCommand
-            \ if g:tplugin_autoload && (empty('<bang>') || exists(':'. matchstr([<f-args>][0], '\s\zs\u\w*$')) != 2) |
-            \ exec s:Command([<f-args>][0])
-            \ .' call s:Autoload(1, ['. string(s:roots[0]) .', <f-args>], "<lt>bang>", ["<lt>line1>", "<lt>line2>"], <lt>q-args>)'
-            \ | endif
+function! TPluginCommand(...) "{{{3
+    let cmd = a:000[0]
+    if g:tplugin_autoload && exists(':'. matchstr(cmd, '\s\zs\u\w*$')) != 2
+        let args = [s:GetRoot()] + a:000
+        " echom "DBG cmd =" cmd
+        exec s:DefineCommand(a:000) .' call s:Autoload(1, '. string(args) .', "<bang>", ["<line1>", "<line2>"], <q-args>)'
+    endif
+endf
 
 
-" :display: :TPluginScan[!] [WHAT] [ROOT]
-" Scan the current root directory for commands and functions. Save 
-" autoload information in "ROOT/tplugin.vim".
-"
-" Where WHAT is a combination of the following identifiers:
-"
-"    c ... commands
-"    f ... functions
-"    p ... <plug> maps
-"    a ... autoload
-"    t ... filetypes
-"    h ... helptags (see also |g:tplugin_helptags|)
-"    all ... all of the above
-"
-" WHAT defaults to |g:tplugin_scan|.
-"
-" With the optional '!', the autocommands are immediatly usable.
-"
-" Other than the AsNeeded plugin, tplugin doesn't support the creation 
-" of autoload information for maps.
-"
-" If you collect repositories in one than more directory, I'd suggest to 
-" create a special script.
-"
-" Example: >
-"   TPluginRoot dir1
-"   TPluginScan
-"   TPluginRoot dir2
-"   TPluginScan
-command! -bang -nargs=* TPluginScan
-            \ call s:ScanRoots(!empty("<bang>"), s:roots, [<f-args>])
-
-
-call s:SetRoot(s:Join([s:rtp[0], 'repos']))
+call s:SetRoot(s:FileJoin(s:rtp[0], 'repos'))
 
 
 augroup TPlugin
     autocmd!
-    autocmd VimEnter * call s:Process()
+    autocmd VimEnter * call s:LoadRequiredPlugins()
 
     if g:tplugin_autoload
         autocmd FuncUndefined * call s:AutoloadFunction(expand("<afile>"))
-        autocmd FileType * if has_key(s:ftypes, &ft) | call s:Filetype(&ft) | endif
+        autocmd FileType * if has_key(s:ftypes, &ft) | call s:LoadFiletype(&ft) | endif
     endif
 
     " if g:tplugin_help
@@ -984,4 +1201,14 @@ single directory (actually a plugin repo)
 - TPluginScan: try to maintain information about command-line completion 
 (this won't work if a custom script-local completion function is used)
 
+0.8
+- Delete commands only when they were defined without a bang; make sure 
+all commands in a file defined without a bang are deleted
+- g:tplugin_scan defaults to 'cfpt'
+- Don't register each autoload function but deduce the repo/plugin from 
+the prefix.
+- g:tplugin_scan defaults to 'cfpta'
+- TPluginCommand and TPluginFunction are functions. Removed the commands 
+with the same name.
+- #TPluginInclude tag
 
