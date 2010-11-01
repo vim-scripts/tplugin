@@ -1,16 +1,17 @@
 " tplugin.vim
 " @Author:      Tom Link (mailto:micathom AT gmail com?subject=[vim])
 " @Website:     http://www.vim.org/account/profile.php?user_id=4037
+" @GIT:         http://github.com/tomtom/tplugin_vim/
 " @License:     GPL (see http://www.gnu.org/licenses/gpl.txt)
 " @Created:     2010-01-04.
-" @Last Change: 2010-09-26.
-" @Revision:    1815
+" @Last Change: 2010-11-01.
+" @Revision:    1843
 " GetLatestVimScripts: 2917 1 :AutoInstall: tplugin.vim
 
 if &cp || exists("loaded_tplugin")
     finish
 endif
-let loaded_tplugin = 8
+let loaded_tplugin = 11
 
 let s:save_cpo = &cpo
 set cpo&vim
@@ -92,7 +93,7 @@ command! -bang -nargs=+ -complete=customlist,s:TPluginComplete TPlugin
 " à la vimfiles but to a single "flat" directory.
 "
 " If tplugin was installed a directory called .vim or vimfiles, the 
-" default root directory is the "repos" subdirectory of the first 
+" default root directory is the "bundle" subdirectory of the first 
 " element in 'runtimepath'. Otherwise, the default root directory is the 
 " directory where tplugin_vim was installed in, i.e. this assumes that 
 " tplugin was loaded from ROOT/tplugin_vim/macros/tplugin.vim
@@ -171,6 +172,16 @@ command! -nargs=+ TPluginBefore
 " See also |:TPluginBefore|.
 command! -nargs=+ TPluginAfter
             \ call s:AddHook(s:after, [<f-args>][0], join([<f-args>][1:-1]))
+
+
+" :display: TPluginUpdate[!]
+" Update all repos (VCS types only).
+" Requires compiled-in ruby support and http://github.com/tomtom/vcsdo 
+" to be installed. You also have to set |g:tplugin#vcsdo#script|.
+"
+" With the optional !, show which commands would be issued but don't do 
+" anything.
+command! -bang TPluginUpdate call tplugin#vcsdo#Update(!empty('<bang>'), s:roots)
 
 
 let &rtp .= ','. escape(expand('<sfile>:p:h:h'), ',')
@@ -368,7 +379,17 @@ endf
 function! TPluginMap(map, repo, plugin, ...) "{{{3
     if g:tplugin_autoload
         let remap = a:0 >= 1 ? a:1 : ''
-        let def   = [s:GetRoot(), a:repo, a:plugin]
+        if has_key(s:plugins, a:plugin)
+            let repo = s:plugins[a:plugin]
+            if repo == a:repo
+                let root = s:repos[repo]
+            else
+                let root = s:GetRoot()
+            endif
+        else
+            let root = s:GetRoot()
+        endif
+        let def   = [root, a:repo, a:plugin]
         let keys  = s:MapKeys(a:map)
         if empty(keys)
             let keys = matchstr(a:map, '\S\+$')
@@ -516,6 +537,7 @@ endf
 
 
 function! s:SetRoot(dir) "{{{3
+    " echom "DBG SetRoot" a:dir
     let root = TPluginGetCanonicalFilename(fnamemodify(a:dir, ':p'))
     let idx = index(s:roots, root)
     if idx > 0
@@ -826,8 +848,26 @@ function! TPluginCommand(...) "{{{3
 endf
 
 
+" :display: TPluginAddRoots(?subdir="bundle")
+" Add all directories named SUBDIR as roots.
+function! TPluginAddRoots(...) "{{{3
+    let subdir = a:0 >= 1 ? a:1 : 'bundle'
+    let myroot = ''
+    for dir in split(finddir(subdir, &rtp), '\n')
+        " echom "DBG TPluginAddRoots" dir
+        if empty(myroot)
+            let myroot = dir
+        endif
+        call s:SetRoot(dir)
+    endfor
+    if !empty(myroot)
+        call s:SetRoot(myroot)
+    endif
+endf
+
+
 if index(['.vim', 'vimfiles'], expand("<sfile>:p:h:h:t")) != -1
-    call s:SetRoot(split(finddir('repos', &rtp) ."\n". TPluginFileJoin(s:rtp[0], 'repos'), '\n')[0])
+    call TPluginAddRoots()
 else
     call s:SetRoot(expand("<sfile>:p:h:h:h"))
 endif
@@ -840,7 +880,6 @@ augroup TPlugin
         autocmd FuncUndefined * call s:AutoloadFunction(expand("<afile>"))
         autocmd FileType * if has_key(s:ftypes, &ft) | call s:LoadFiletype(&ft) | endif
     endif
-
 augroup END
 
 
