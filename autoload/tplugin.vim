@@ -3,8 +3,8 @@
 " @GIT:         http://github.com/tomtom/tplugin_vim/
 " @License:     GPL (see http://www.gnu.org/licenses/gpl.txt)
 " @Created:     2010-09-17.
-" @Last Change: 2010-10-24.
-" @Revision:    71
+" @Last Change: 2011-03-23.
+" @Revision:    195
 
 
 if !exists('g:tplugin#autoload_exclude')
@@ -23,9 +23,10 @@ if !exists('g:tplugin#scan')
     "    t ... filetypes
     "    h ... helptags if not available
     "    a ... autoload
+    "    m ... parse vim-addon-manager metadata
     "    _ ... include _tplugin.vim files
     "    all ... all of the above
-    let g:tplugin#scan = 'cfptha_'   "{{{2
+    let g:tplugin#scan = 'cfptham_'   "{{{2
 endif
 
 
@@ -48,10 +49,11 @@ function! tplugin#ScanRoots(immediate, roots, args) "{{{3
         let awhat = g:tplugin#scan
     endif
     if awhat == 'all'
-        let what = ['c', 'f', 'a', 'p', 'h', 't', 'l', '_']
+        let what = ['c', 'f', 'a', 'p', 'h', 't', 'l', 'm', '_']
     else
         let what = split(awhat, '\zs')
     endif
+    " echom "DBG what" string(what)
 
     let aroot = get(a:args, 1, '')
     if empty(aroot)
@@ -100,6 +102,10 @@ function! tplugin#ScanRoots(immediate, roots, args) "{{{3
             endfor
         endif
 
+        if index(what, 'm') != -1
+            call s:ProcessAddonInfos(out, root, 'guess')
+        endif
+
         if is_tree && index(what, 't') != -1
 
             for ftdetect in filter(copy(files0), 'strpart(v:val, pos0) =~ ''^[^\/]\+[\/]ftdetect[\/][^\/]\{-}\.vim$''')
@@ -142,6 +148,7 @@ function! tplugin#ScanRoots(immediate, roots, args) "{{{3
         endif
         
         let s:scan_repo_done = {}
+        let s:vimenter_augroups_done = {}
         try
             let fidx = 0
             let menu_done = {}
@@ -165,28 +172,31 @@ function! tplugin#ScanRoots(immediate, roots, args) "{{{3
                 let plugin = matchstr(file, '[\/]\zs[^\/]\{-}\ze\.vim$')
                 " TLogVAR file, repo, plugin
 
-                let is_plugin = !is_tree || strpart(file, pos0) =~ '^[^\/]\+[\/]plugin[\/][^\/]\{-}\.vim$'
+                let file0 = strpart(file, pos0)
 
                 let lines = readfile(file)
 
-                if is_plugin
-                    call add(out, printf('call TPluginRegisterPlugin(%s, %s)',
-                                \ string(repo), string(plugin)))
-                    if !empty(g:tplugin_menu_prefix)
-                        if is_tree
-                            let mrepo = escape(repo, '\.')
-                        else
-                            let mrepo = escape(fnamemodify(root, ':t'), '\.')
+                if !is_tree
+
+                    if file0 =~ '^[^\/]\+[\/]plugin[\/][^\/]\{-}\.vim$'
+                        call add(out, printf('call TPluginRegisterPlugin(%s, %s)',
+                                    \ string(repo), string(plugin)))
+                        if !empty(g:tplugin_menu_prefix)
+                            if is_tree
+                                let mrepo = escape(repo, '\.')
+                            else
+                                let mrepo = escape(fnamemodify(root, ':t'), '\.')
+                            endif
+                            let mplugin = escape(plugin, '\.')
+                            if !has_key(menu_done, repo)
+                                call add(out, 'call TPluginMenu('. string(mrepo .'.Add\ Repository') .', '.
+                                            \ string(repo) .')')
+                                call add(out, 'call TPluginMenu('. string(mrepo .'.-'. mrepo .'-') .', ":")')
+                                let menu_done[repo] = 1
+                            endif
+                            call add(out, 'call TPluginMenu('. string(mrepo .'.'. mplugin) .', '.
+                                        \ string(repo) .', '. string(plugin) .')')
                         endif
-                        let mplugin = escape(plugin, '\.')
-                        if !has_key(menu_done, repo)
-                            call add(out, 'call TPluginMenu('. string(mrepo .'.Add\ Repository') .', '.
-                                        \ string(repo) .')')
-                            call add(out, 'call TPluginMenu('. string(mrepo .'.-'. mrepo .'-') .', ":")')
-                            let menu_done[repo] = 1
-                        endif
-                        call add(out, 'call TPluginMenu('. string(mrepo .'.'. mplugin) .', '.
-                                    \ string(repo) .', '. string(plugin) .')')
                     endif
 
                 endif
@@ -238,66 +248,105 @@ let s:scanner = {
             \ }
 let s:parameters = {}
 
+
 function! s:ScanSource(file, repo, plugin, what, lines) "{{{3
+    let filebase = matchstr(a:file, '[\\/][^\\/]\+[\\/]\(plugin\|ftplugin\|syntax\|indent\|autoload\)[\\/]')
     let text = join(a:lines, "\n")
     let text = substitute(text, '\n\s*\\', '', 'g')
     let lines = split(text, '\n')
     let rx = join(filter(map(copy(a:what), 'get(get(s:scanner, v:val, {}), "rx", "")'), '!empty(v:val)'), '\|')
     let out = []
+    let tail = []
+    let augroup0 = ''
     let include = 0
     for line in lines
         if include
             if line !~ '\S'
                 let include = 0
+            elseif line =~ '^\s*"\s*</VIMPLUGIN>\s*$'
+                let include = 0
             else
                 call add(out, line)
             endif
-        elseif line =~ '^\s*"\s*@TPluginInclude\s*$'
-            let include = 1
-        elseif line =~ '^\s*"\s*@TPluginInclude\s*\S'
-            let out_line = substitute(line, '^\s*"\s*@TPluginInclude\s*', '', '')
-            call add(out, out_line)
-        elseif line =~ '^\s*"\s*@TPlugin\(Before\|After\)\s\+\S'
-            let out_line = matchstr(line, '^\s*"\s*@\zsTPlugin.*$')
-            call add(out, out_line)
-        elseif line =~ '^\s*"\s*@TPluginMap!\?\s\+\w\{-}map\s\+.\+$'
-            let maplist = matchlist(line, '^\s*"\s*@TPluginMap\(!\)\?\s\+\(\w\{-}map\(\s*<silent>\)\+\)\s\+\(.\+\)$')
-            let bang = !empty(maplist[1])
-            let cmd = maplist[2]
-            for val in split(maplist[4], '\s\+')
-                if bang
-                    if has_key(s:parameters, val)
-                        let val = s:parameters[val]
-                    else
-                        if val =~ '^g:\w\+$'
-                            if exists(val)
-                                let var = val
-                                let val = eval(val)
-                                call add(out, printf('if !exists(%s)', string(var)))
-                                call add(out, printf('    let %s = %s', var, string(val)))
-                                call add(out, 'endif')
-                            else
-                                echom "TPlugin: Undefined variable ". val
-                                continue
-                            endif
+        else
+            if !empty(tail)
+                let out += tail
+                let tail = []
+            endif
+            if line =~ '^\s*"\s*@TPluginInclude\s*$'
+                let include = 1
+            elseif line =~ '^\s*"\s*@TPluginInclude\s*\S'
+                let out_line = substitute(line, '^\s*"\s*@TPluginInclude\s*', '', '')
+                call add(out, out_line)
+            elseif line =~ '^\s*"\s*@TPlugin\(Before\|After\)\s\+\S'
+                let out_line = matchstr(line, '^\s*"\s*@\zsTPlugin.*$')
+                call add(out, out_line)
+            elseif line =~ '^\s*"\s*@TPluginMap!\?\s\+\w\{-}map\s\+.\+$'
+                let maplist = matchlist(line, '^\s*"\s*@TPluginMap\(!\)\?\s\+\(\w\{-}map\(\s*<silent>\)\+\)\s\+\(.\+\)$')
+                let bang = !empty(maplist[1])
+                let cmd = maplist[2]
+                for val in split(maplist[4], '\s\+')
+                    if bang
+                        if has_key(s:parameters, val)
+                            let val = s:parameters[val]
                         else
-                            let val = eval(val)
+                            if val =~ '^g:\w\+$'
+                                if exists(val)
+                                    let var = val
+                                    let val = eval(val)
+                                    call add(out, printf('if !exists(%s)', string(var)))
+                                    call add(out, printf('    let %s = %s', var, string(val)))
+                                    call add(out, 'endif')
+                                else
+                                    echom "TPlugin: Undefined variable ". val
+                                    continue
+                                endif
+                            else
+                                let val = eval(val)
+                            endif
+                            let s:parameters[var] = val
                         endif
-                        let s:parameters[var] = val
                     endif
+                    let out_line = printf("call TPluginMap(%s, %s, %s)",
+                                \ string(cmd .' '. val),
+                                \ string(a:repo), string(a:plugin))
+                    call add(out, out_line)
+                endfor
+            elseif line =~ '^\s*"\s*<VIMPLUGIN\s\+id="\([^"]\+\)"\(\s\+require="\([^"]\+\)"\)\?\s*>\s*$'
+                let ml = matchlist(line, '^\s*"\s*<VIMPLUGIN\s\+id="\([^"]\+\)"\(\s\+require="\([^"]\+\)"\)\?\s*>\s*$')
+                let require = get(ml, 3, '')
+                if !empty(require)
+                    let require = substitute(require, '[[:alnum:]_]\+', 'has("&")', 'g')
+                    call add(out, 'if '. require)
+                    call add(tail, 'endif')
                 endif
-                let out_line = printf("call TPluginMap(%s, %s, %s)",
-                            \ string(cmd .' '. val),
-                            \ string(a:repo), string(a:plugin))
-                call add(out, out_line)
-            endfor
-        elseif line =~ rx
-            let out_line = s:ScanLine(a:file, a:repo, a:plugin, a:what, line)
-            if !empty(out_line)
-                call add(out, out_line)
+                let include = 1
+            elseif line =~# '^\s*:\?aug\%[roup]\s\+\(end\|END\)\s*$'
+                let augroup0 = ''
+            elseif line =~# '^\s*:\?aug\%[roup]\s\+\(\S\+\)\s*$'
+                let augroup0 = matchstr(line, '^\s*:\?aug\%[roup]\s\+\zs\S\+\ze\s*$')
+            elseif line =~# '^\s*:\?au\%[tocmd]\s\+\(\S\+\s\+\)\?\([^,]\+,\)\{-}VimEnter\>'
+                let ml = matchlist(line, '^\s*:\?au\%[tocmd]\s\+\(\S\+\s\+\)\?\([^,]\+,\)\{-}VimEnter\>\(,\S\+\)\?\s\+\(\\\s\|\S\)\+\s\+\(nested\s\+\)\?\(.\+\)$')
+                let augroup = get(ml, 1, '')
+                if empty(augroup)
+                    let augroup = augroup0
+                endif
+                if !empty(augroup) && !empty(filebase) && !has_key(s:vimenter_augroups_done, augroup)
+                    let cmd = 'TPluginAfter \V'. escape(filebase, '\') .' do '. augroup .' VimEnter'
+                    call add(out, cmd)
+                    let s:vimenter_augroups_done[augroup] = 1
+                endif
+            elseif line =~ rx
+                let out_line = s:ScanLine(a:file, a:repo, a:plugin, a:what, line)
+                if !empty(out_line)
+                    call add(out, out_line)
+                endif
             endif
         endif
     endfor
+    if !empty(tail)
+        let out += tail
+    endif
     return out
 endf
 
@@ -347,6 +396,19 @@ function! s:GetRealRoot(rootname) "{{{3
 endf
 
 
+function! s:ProcessAddonInfos(out, root, master_dir) "{{{3
+    let [is_tree, root] = s:GetRealRoot(a:root)
+    let pos0 = len(root) + 1
+    if is_tree
+        let infofiles = split(glob(TPluginFileJoin(root, '*', '*-addon-info.txt')), '\n')
+        for info in infofiles
+            let repo = fnamemodify(strpart(info, pos0), ':h')
+            call s:ParseAddonInfo(a:out, repo, info)
+        endfor
+    endif
+endf
+
+
 function! s:MakeHelpTags(roots, master_dir) "{{{3
     let tagfiles = []
     for root in a:roots
@@ -358,7 +420,7 @@ function! s:MakeHelpTags(roots, master_dir) "{{{3
                     let tags = TPluginFileJoin(doc, 'tags')
                     if !filereadable(tags) || s:ShouldMakeHelptags(doc)
                         " echom "DBG MakeHelpTags" 'helptags '. TPluginFnameEscape(doc)
-                        exec 'helptags '. TPluginFnameEscape(doc)
+                        exec 'silent! helptags '. TPluginFnameEscape(doc)
                     endif
                     if filereadable(tags)
                         call add(tagfiles, tags)
@@ -373,7 +435,7 @@ function! s:MakeHelpTags(roots, master_dir) "{{{3
         let master_dir = a:master_dir
     endif
     if isdirectory(master_dir) && !empty(tagfiles)
-        exec 'helptags '. TPluginFnameEscape(master_dir)
+        exec 'silent! helptags '. TPluginFnameEscape(master_dir)
         let master_tags = TPluginFileJoin(master_dir, 'tags')
         " TLogVAR master_dir, master_tags
         if filereadable(master_tags)
@@ -469,5 +531,22 @@ function! s:AddAutoloads(out, root, pos0, files) "{{{3
     endfor
 endf
 
+
+function! s:ParseAddonInfo(out, repo, file) "{{{3
+    let src = join(readfile(a:file), ' ')
+    let dict = eval(src)
+    let deps = []
+    for [name, def] in items(get(dict, 'dependencies', {}))
+        let url = get(def, 'url', '')
+        if url == 'git://github.com/tomtom/'. name .'_vim.git'
+            call add(deps, name .'_vim')
+        else
+            call add(deps, name)
+        endif
+    endfor
+    if !empty(deps)
+        call add(a:out, 'call TPluginDependencies('. string(a:repo) .', '. string(deps) .')')
+    endif
+endf
 
 

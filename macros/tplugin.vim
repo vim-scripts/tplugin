@@ -4,14 +4,14 @@
 " @GIT:         http://github.com/tomtom/tplugin_vim/
 " @License:     GPL (see http://www.gnu.org/licenses/gpl.txt)
 " @Created:     2010-01-04.
-" @Last Change: 2010-11-01.
-" @Revision:    1843
+" @Last Change: 2011-04-17.
+" @Revision:    1925
 " GetLatestVimScripts: 2917 1 :AutoInstall: tplugin.vim
 
 if &cp || exists("loaded_tplugin")
     finish
 endif
-let loaded_tplugin = 11
+let loaded_tplugin = 12
 
 let s:save_cpo = &cpo
 set cpo&vim
@@ -90,7 +90,7 @@ command! -bang -nargs=+ -complete=customlist,s:TPluginComplete TPlugin
 " |:TPluginScan|).
 "
 " If DIRECTORY ends with "*", it doesn't refer to a directory hierarchy 
-" Ã  la vimfiles but to a single "flat" directory.
+" à la vimfiles but to a single "flat" directory.
 "
 " If tplugin was installed a directory called .vim or vimfiles, the 
 " default root directory is the "bundle" subdirectory of the first 
@@ -193,6 +193,7 @@ let s:plugins = {}
 let s:done = {'-': {}}
 let s:before = {}
 let s:after = {}
+let s:dependencies = {}
 let s:ftypes = {}
 let s:functions = {}
 let s:autoloads = {}
@@ -276,6 +277,7 @@ function! s:Autoload(type, def, bang, range, args) "{{{3
         let pluginfile = s:GetPluginFile(root, file[0], file[1])
         call s:RemoveAutoloads(pluginfile, [cmd])
     endif
+    " echom "DBG s:Autoload" string(file)
     if len(file) >= 1 && len(file) <= 2
         call call('TPluginRequire', [1, root] + file)
     else
@@ -320,8 +322,10 @@ endf
 
 
 function! s:AutoloadFunction(fn) "{{{3
+    " echom "DBG AutoloadFunction" a:fn has_key(s:functions, a:fn)
     if stridx(a:fn, '#') != -1
         let prefix = substitute(a:fn, '#[^#]\{-}$', '', '')
+        " echom "DBG AutoloadFunction prefix" prefix has_key(s:autoloads, prefix)
         if has_key(s:autoloads, prefix)
             let def = remove(s:autoloads, prefix)
             let root = def[0]
@@ -329,7 +333,8 @@ function! s:AutoloadFunction(fn) "{{{3
             let [root, rootrepo, plugindir] = s:GetRootPluginDir(root, repo)
             call TPluginRequire(1, root, repo, s:GetPluginPattern(rootrepo))
             call s:RunHooks(s:before, rootrepo, rootrepo .'/autoload/')
-            let autoload_file = 'autoload/'. prefix .'.vim'
+            let autoload_file = 'autoload/'. substitute(prefix, '#', '/', 'g') .'.vim'
+            " echom "DBG AutoloadFunction autoload_file" rootrepo autoload_file
             exec printf('autocmd TPlugin SourceCmd */%s call s:SourceAutoloadFunction(%s, %s)',
                         \ escape(autoload_file, '\ '), string(rootrepo), string(autoload_file))
         endif
@@ -354,6 +359,7 @@ endf
 
 function! s:SourceAutoloadFunction(rootrepo, autoload_file) "{{{3
     let afile = expand('<afile>')
+    " echom "DBG SourceAutoloadFunction" afile
     let afile = TPluginGetCanonicalFilename(strpart(afile, len(afile) - len(a:autoload_file)))
     if afile == a:autoload_file
         let autoload_file_e = TPluginFnameEscape(a:autoload_file)
@@ -558,6 +564,7 @@ function! s:SetRoot(dir) "{{{3
             try
                 exec 'source '. TPluginFnameEscape(autoload)
             catch /^TPluginScan:Outdated$/
+                call inputdialog("Rescanning roots: Please be patient")
                 silent call tplugin#ScanRoots(1, s:roots, [])
             catch
                 echohl Error
@@ -571,28 +578,40 @@ endf
 
 
 function! s:AddRepo(rootrepos, isflat) "{{{3
-    let rtp = split(&rtp, ',')
-    let idx = index(rtp, s:rtp[0])
-    if idx == -1
-        let idx = 1
-    else
-        let idx += 1
-    endif
     let rootrepos = filter(copy(a:rootrepos), '!has_key(s:done, v:val)')
     if !empty(rootrepos)
         for rootrepo in rootrepos
             let s:done[rootrepo] = {}
+            let rtp = split(&rtp, ',')
+            let idx = index(rtp, s:rtp[0])
+            if idx == -1
+                let idx = 1
+            else
+                let idx += 1
+            endif
+            " echom "DBG AddRepo alter rtp:" string(rtp) idx
             if index(rtp, rootrepo) == -1
                 if !a:isflat
-                    call insert(rtp, rootrepo, idx)
+                    " echom "DBG AddRepo rootrepo:" rootrepo idx
+                    let rtp = insert(rtp, rootrepo, idx)
                     let after_dir = TPluginFileJoin(rootrepo, 'after')
                     if isdirectory(after_dir)
-                        call insert(rtp, after_dir, -1)
+                        let rtp = insert(rtp, after_dir, -1)
                     endif
                     let &rtp = join(rtp, ',')
+                    " echom "DBG AddRepo neuer &rtp:" &rtp
                     let repo_tplugin = rootrepo .'/'. g:tplugin_file .'.vim'
                     if filereadable(repo_tplugin)
                         exec 'source '. TPluginFnameEscape(repo_tplugin)
+                    endif
+                    let repo = fnamemodify(rootrepo, ':t')
+                    if has_key(s:dependencies, repo)
+                        let deps = s:dependencies[repo]
+                        call remove(s:dependencies, repo)
+                        for dependency in deps
+                            " echom "DBG dependency" repo dependency
+                            call TPluginRequire(1, '', dependency)
+                        endfor
                     endif
                 endif
                 let tplugin_repo = fnamemodify(rootrepo, ':h') .'/'. g:tplugin_file .'_'. fnamemodify(rootrepo, ':t') .'.vim'
@@ -609,14 +628,15 @@ function! s:LoadPlugins(mode, rootrepo, pluginfiles) "{{{3
     if empty(a:pluginfiles)
         return
     endif
-    let done = s:done[a:rootrepo]
-    if has_key(done, '*')
+    let done_repo = s:done[a:rootrepo]
+    if has_key(done_repo, '*')
         return
     endif
     for pluginfile in a:pluginfiles
         let pluginfile = TPluginGetCanonicalFilename(pluginfile)
-        if pluginfile != '-' && !has_key(done, pluginfile)
-            let done[pluginfile] = 1
+        " echom "DBG LoadPlugins" pluginfile
+        if pluginfile != '-' && !has_key(done_repo, pluginfile)
+            let done_repo[pluginfile] = 1
             if filereadable(pluginfile)
                 call s:LoadFile(a:rootrepo, pluginfile)
                 if a:mode == 2
@@ -636,16 +656,6 @@ function! s:LoadFile(rootrepo, filename) "{{{3
     " exec 'runtime! after/'. TPluginFnameEscape(strpart(a:filename, pos0))
     exec 'runtime! '. TPluginFnameEscape(strpart(a:filename, pos0))
     call s:RunHooks(s:after, a:rootrepo, a:filename)
-endf
-
-
-function! s:GetVimEnterAutocommands() "{{{3
-    redir => autocmds
-    silent autocmd VimEnter
-    redir END
-    let aus = split(autocmds, '\n')
-    call filter(aus, 'v:val[0] == " "')
-    return aus
 endf
 
 
@@ -685,6 +695,7 @@ endf
 " :nodoc:
 function! TPluginRequire(mode, root, repo, ...) "{{{3
     let [root, rootrepo, plugindir] = s:GetRootPluginDir(a:root, a:repo)
+    " echom "DBG TPluginRequire" root rootrepo plugindir !has_key(s:done, rootrepo)
     if empty(a:000) || a:1 == '*'
         let pluginfiles = split(glob(TPluginFileJoin(plugindir, '*.vim')), '\n')
     elseif a:1 == '.'
@@ -692,6 +703,7 @@ function! TPluginRequire(mode, root, repo, ...) "{{{3
     else
         let pluginfiles = map(copy(a:000), 'TPluginFileJoin(plugindir, v:val .".vim")')
     endif
+    " echom "DBG TPluginRequire pluginfiles:" string(pluginfiles) (a:mode || !has('vim_starting'))
     call filter(pluginfiles, 'v:val !~ ''\V\[\/]'. g:tplugin_file .'\(_\S\{-}\)\?\.vim\$''')
     if a:mode || !has('vim_starting')
         call s:AddRepo([rootrepo], s:IsFlatRoot(root))
@@ -701,7 +713,7 @@ function! TPluginRequire(mode, root, repo, ...) "{{{3
             let s:reg[rootrepo] = []
         endif
         let s:reg[rootrepo] += pluginfiles
-    end
+    endif
 endf
 
 
@@ -741,7 +753,8 @@ endf
 
 function! s:TPluginComplete(ArgLead, CmdLine, CursorPos) "{{{3
     let repo = matchstr(a:CmdLine, '\<TPlugin\s\+\zs\(\S\+\)\ze\s')
-    let rv = []
+    let rv = keys(s:repos)
+    call filter(rv, 'v:val =~ a:ArgLead')
     let root = s:GetRoot()
     if empty(repo)
         if root =~ '[\\/]\*$'
@@ -760,6 +773,7 @@ function! s:TPluginComplete(ArgLead, CmdLine, CursorPos) "{{{3
         call filter(files, 'stridx(v:val, a:ArgLead) != -1')
     endif
     call filter(files, 'v:val !~ ''\V'. g:tplugin_file .'\(_\w\+\)\?\(\.vim\)\?\$''')
+    call filter(files, 'index(rv, v:val) == -1')
     let rv += files
     return rv
 endf
@@ -866,6 +880,13 @@ function! TPluginAddRoots(...) "{{{3
 endf
 
 
+function! TPluginDependencies(repo, deps) "{{{3
+    if !has_key(s:dependencies, a:repo)
+        let s:dependencies[a:repo] = a:deps
+    endif
+endf
+
+
 if index(['.vim', 'vimfiles'], expand("<sfile>:p:h:h:t")) != -1
     call TPluginAddRoots()
 else
@@ -892,7 +913,7 @@ finish
 
 0.2
 - Improved command-line completion for :TPlugin
-- Experimental autoload for commands and functions (Ã  la AsNeeded)
+- Experimental autoload for commands and functions (à la AsNeeded)
 - The after path is inserted at the second to last position
 - When autoload is enabled and g:tplugin_menu_prefix is not empty, build 
 a menu with available plugins (NOTE: this is disabled by default)
